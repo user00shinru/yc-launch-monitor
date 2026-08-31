@@ -24,7 +24,7 @@ app = FastAPI(title="YC Launch Monitor Agent", version="1.0.0")
 
 MANIFEST = {
     "protocol": "marketplace-agent",
-    "protocol_versi": "1.0",
+    "protocol_version": "1.0",
     "metadata": {
         "agent_id": "yc-launch-monitor",
         "name": "YC Launch Monitor",
