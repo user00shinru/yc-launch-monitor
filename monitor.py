@@ -32,6 +32,8 @@ def poll_yc_sources(yc: YCAlgolia, alert: bool, lookback_hours: float) -> dict:
     """Sources 1+2: YC directory & Launch YC official posts. Returns stats."""
     now = time.time()
     stats = {"new_companies": 0, "speedrun": 0, "launches_seen": 0}
+    new_comps: list[dict] = []
+    alerted_items: list[tuple[str, str, dict]] = []
 
     companies = yc.recent_companies(hits=60) or []
     for c in companies:
@@ -44,6 +46,8 @@ def poll_yc_sources(yc: YCAlgolia, alert: bool, lookback_hours: float) -> dict:
             continue
         state.mark_seen("company", uid, {"name": c.get("name")}, alerted=alert)
         stats["new_companies"] += 1
+        new_comps.append(c)
+        alerted_items.append(("company", uid, c))
         if _is_speedrun(c):
             stats["speedrun"] += 1
 
@@ -66,8 +70,25 @@ def poll_yc_sources(yc: YCAlgolia, alert: bool, lookback_hours: float) -> dict:
             continue
         state.mark_seen("launch", uid, {"name": comp.get("name")}, alerted=alert)
         stats["launches_seen"] += 1
+        new_comps.append(l)
+        alerted_items.append(("launch", uid, l))
         if str(l.get("batch") or comp.get("batch") or "").lower().find("speedrun") >= 0:
             stats["speedrun"] += 1
+
+    # Deliver official alerts (company/launch) to Slack — name, description, link included.
+    if alert and new_comps:
+        sent = slack_alert.alert_official_companies(new_comps)
+        if sent:
+            for kind_i, uid_i, c_i in alerted_items:
+                state.mark_alerted(kind_i, uid_i)
+                comp_i = c_i.get("company") or {}
+                state.record_alert(
+                    "official",
+                    c_i.get("name") or comp_i.get("name") or "Unknown",
+                    (c_i.get("one_liner") or c_i.get("long_description") or
+                     comp_i.get("one_liner") or "")[:300],
+                    c_i.get("website") or
+                    f"https://www.ycombinator.com/companies/{comp_i.get('slug') or uid_i}")
 
     return stats
 
@@ -83,7 +104,7 @@ def poll_social_sources(yc: YCAlgolia, alert: bool) -> dict:
         for p in posts:
             raw_link = p.get("link") or ""
             raw_key = platform + ":gnews:" + raw_link if "news.google.com" in raw_link else None
-            if raw_key and state.is_seen(raw_key):
+            if raw_key and state.is_seen("social_post", raw_key):
                 continue  # already processed via this feed entry
             # resolve Google News redirects lazily — only for items not yet processed
             if raw_key:
@@ -96,14 +117,14 @@ def poll_social_sources(yc: YCAlgolia, alert: bool) -> dict:
                 key = platform + ":" + (raw_link or p["title"][:80])
             if state.is_seen("social_post", key):
                 if raw_key:
-                    state.mark_seen(raw_key)  # cache resolution result
+                    state.mark_seen("social_post", raw_key)  # cache resolution result
                 continue
             # also treat a canonical status URL as the dedup key
             canon = social._normalize_url(p.get("link") or "")
             alt_key = platform + ":" + canon if canon and canon != p["link"] else None
             if alt_key and state.is_seen("social_post", alt_key):
                 if raw_key:
-                    state.mark_seen(raw_key)
+                    state.mark_seen("social_post", raw_key)
                 continue
             # keyword match on title/description/tweet text
             text = " ".join(filter(None, [p.get("title"), p.get("description")]))
@@ -118,7 +139,7 @@ def poll_social_sources(yc: YCAlgolia, alert: bool) -> dict:
             if alt_key:
                 state.mark_seen("social_post", alt_key, {"title": p.get("title")}, alerted=bool(kw))
             if raw_key:
-                state.mark_seen(raw_key)  # so future scans skip resolving this feed entry
+                state.mark_seen("social_post", raw_key)  # so future scans skip resolving this feed entry
             if kw:
                 fresh += 1
                 sig = {
