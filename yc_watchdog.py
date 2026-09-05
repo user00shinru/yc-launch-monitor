@@ -124,6 +124,18 @@ def kill_cloudflared():
     time.sleep(2)
 
 
+def public_dns_resolves(url):
+    """Resolve hostname via 1.1.1.1 — local Wi-Fi DNS lags on new trycloudflare
+    subdomains, so local resolution failure is NOT proof of death."""
+    host = url.split("//", 1)[1].split("/", 1)[0]
+    try:
+        out = subprocess.run(f"nslookup {host} 1.1.1.1", capture_output=True,
+                             text=True, shell=True, timeout=15).stdout
+        return "NXDOMAIN" not in out and "can't find" not in out
+    except Exception:
+        return False
+
+
 def main():
     if locked_recently():
         sys.exit(0)
@@ -139,6 +151,9 @@ def main():
             msgs.append("YC agent server port 8001 up tapi /manifest gagal — CEK server.log")
 
     # 2+3) tunnel alive AND serving
+    # IMPORTANT: quick-tunnel URL changes on every restart. A transient manifest
+    # failure (Wi-Fi blip) must NOT trigger a restart — retry first, and only
+    # kill cloudflared when the PROCESS itself is gone or all retries fail.
     url = None
     pids = wmic_pids("name='cloudflared.exe'")
     if pids:
@@ -148,10 +163,27 @@ def main():
             url = m.group(0) if m else None
         except OSError:
             pass
-        if url and not http_ok(url + "/manifest"):
+        if url:
+            # Tunnel declared dead only if BOTH public DNS is gone AND local HTTP
+            # fails — a local DNS/Wi-Fi blip must not kill a healthy tunnel.
+            if not public_dns_resolves(url):
+                ok = False
+                for _ in range(3):  # ~45s tolerance
+                    if http_ok(url + "/manifest"):
+                        ok = True
+                        break
+                    time.sleep(15)
+                if not ok:
+                    kill_cloudflared()
+                    url = None
+                    msgs.append("Tunnel NXDOMAIN di DNS publik + unreachable → restart (URL AKAN BERUBAH, update Pond!)")
+            else:
+                ok = http_ok(url + "/manifest")
+                if not ok:
+                    msgs.append(f"DNS publik OK tapi HTTP lokal gagal — kemungkinan Wi-Fi blip, tunnel TIDAK di-restart (URL aman: {url})")
+        else:
             kill_cloudflared()
-            url = None
-            msgs.append("Tunnel hidup tapi /manifest unreachable → restart tunnel")
+            msgs.append("cloudflared hidup tapi URL tidak ditemukan di log → restart")
 
     if not url:
         url = start_tunnel()
